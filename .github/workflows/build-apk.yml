@@ -1,0 +1,64 @@
+name: Build APK
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build web bundle (env baked in at build time)
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_TRIPWISE_FN: ${{ secrets.VITE_TRIPWISE_FN }}
+          VITE_TRIPWISE_SECRET: ${{ secrets.VITE_TRIPWISE_SECRET }}
+          VITE_PMTILES_URL: ${{ secrets.VITE_PMTILES_URL }}
+        run: npm run build
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Generate & sync Android project
+        run: |
+          npx cap telemetry off || true
+          npx cap add android
+          npx cap sync android
+
+      - name: Patch native config (permissions + optional google-services)
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          if ! grep -q "ACCESS_BACKGROUND_LOCATION" "$MANIFEST"; then
+            PERMS='    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n'
+            sed -i "s|<application|${PERMS}    <application|" "$MANIFEST"
+          fi
+          APP_GRADLE=android/app/build.gradle
+          if grep -q "apply plugin: 'com.google.gms.google-services'" "$APP_GRADLE"; then
+            sed -i "s|apply plugin: 'com.google.gms.google-services'|if (file('google-services.json').exists()) { apply plugin: 'com.google.gms.google-services' }|" "$APP_GRADLE"
+          fi
+
+      - name: Build debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tripwise-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
